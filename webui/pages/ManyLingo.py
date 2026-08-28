@@ -9,11 +9,16 @@ if root_dir in sys.path:
     sys.path.remove(root_dir)
 sys.path.insert(0, root_dir)
 
-from app.config import config
-from app.models import const
-from app.models.schema import ManyLingoItem, VideoAspect, VideoConcatMode, VideoParams
-from app.services import state as sm
-from app.services import webui_task
+from app.config import config  # noqa: E402
+from app.models import const  # noqa: E402
+from app.models.schema import (  # noqa: E402
+    ManyLingoItem,
+    VideoAspect,
+    VideoConcatMode,
+    VideoParams,
+)
+from app.services import state as sm  # noqa: E402
+from app.services import webui_task  # noqa: E402
 
 DEFAULT_ITEMS = """house | This house is big. | Esta casa es grande. | large house exterior
 living room | We watch TV in the living room. | Vemos televisión en la sala. | family watching television in living room
