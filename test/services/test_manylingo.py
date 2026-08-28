@@ -1,5 +1,12 @@
 from app.models.schema import ManyLingoItem, VideoParams
-from app.services.manylingo import _timed_items, is_manylingo_mode
+from app.services import manylingo
+from app.services.manylingo import (
+    _timed_items,
+    build_narration,
+    generate_manylingo_items,
+    is_manylingo_mode,
+    normalize_words,
+)
 
 
 def test_standard_mode_stays_unchanged():
@@ -35,6 +42,66 @@ def test_manylingo_item_keeps_visual_data_separate_from_narration():
     assert params.video_script == "House. This house is big."
     assert params.manylingo_items[0].translation == "Esta casa es grande."
     assert params.manylingo_items[0].search_term == "large house exterior"
+
+
+def test_normalize_words_preserves_order_and_removes_duplicates():
+    assert normalize_words("house\nliving room\nHouse\nkitchen") == [
+        "house",
+        "living room",
+        "kitchen",
+    ]
+
+
+def test_build_narration_excludes_translation():
+    items = [
+        ManyLingoItem(
+            word="house",
+            sentence="This house is big.",
+            translation="Esta casa es grande.",
+        )
+    ]
+    narration = build_narration(items)
+    assert narration == "house. This house is big."
+    assert "Esta casa" not in narration
+
+
+def test_generate_manylingo_items_uses_configured_llm_without_real_api(monkeypatch):
+    response = (
+        '[{"word":"house","sentence":"This house is big.",'
+        '"translation":"Esta casa es grande.",'
+        '"search_term":"large house exterior"}]'
+    )
+
+    monkeypatch.setattr(
+        "app.services.llm._generate_response",
+        lambda prompt, **kwargs: response,
+    )
+
+    items = generate_manylingo_items("house", translation_language="Spanish")
+    assert len(items) == 1
+    assert items[0].word == "house"
+    assert items[0].sentence == "This house is big."
+    assert items[0].translation == "Esta casa es grande."
+    assert items[0].search_term == "large house exterior"
+
+
+def test_generate_manylingo_items_rejects_changed_word(monkeypatch):
+    response = (
+        '[{"word":"home","sentence":"This home is big.",'
+        '"translation":"Esta casa es grande.",'
+        '"search_term":"large house exterior"}]'
+    )
+    monkeypatch.setattr(
+        "app.services.llm._generate_response",
+        lambda prompt, **kwargs: response,
+    )
+
+    try:
+        generate_manylingo_items("house", translation_language="Spanish")
+    except ValueError as exc:
+        assert "changed the input word" in str(exc)
+    else:
+        raise AssertionError("Expected changed vocabulary word to be rejected")
 
 
 def test_manylingo_items_are_distributed_across_duration():
