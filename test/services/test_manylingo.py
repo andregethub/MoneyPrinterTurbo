@@ -66,8 +66,8 @@ def test_build_narration_excludes_translation():
 
 def test_generate_manylingo_items_uses_configured_llm_without_real_api(monkeypatch):
     response = (
-        '[{"word":"house","sentence":"This house is big.",'
-        '"translation":"Esta casa es grande.",'
+        '[{"word":"house","sentence":"This house is very big and beautiful.",'
+        '"translation":"Esta casa es muy grande y hermosa.",'
         '"search_term":"large house exterior"}]'
     )
 
@@ -79,15 +79,15 @@ def test_generate_manylingo_items_uses_configured_llm_without_real_api(monkeypat
     items = generate_manylingo_items("house", translation_language="Spanish")
     assert len(items) == 1
     assert items[0].word == "house"
-    assert items[0].sentence == "This house is big."
-    assert items[0].translation == "Esta casa es grande."
+    assert items[0].sentence == "This house is very big and beautiful."
+    assert items[0].translation == "Esta casa es muy grande y hermosa."
     assert items[0].search_term == "large house exterior"
 
 
 def test_generate_manylingo_items_rejects_changed_word(monkeypatch):
     response = (
-        '[{"word":"home","sentence":"This home is big.",'
-        '"translation":"Esta casa es grande.",'
+        '[{"word":"home","sentence":"This home is very big and beautiful.",'
+        '"translation":"Esta casa es muy grande y hermosa.",'
         '"search_term":"large house exterior"}]'
     )
     monkeypatch.setattr(
@@ -103,7 +103,7 @@ def test_generate_manylingo_items_rejects_changed_word(monkeypatch):
         raise AssertionError("Expected changed vocabulary word to be rejected")
 
 
-def test_manylingo_items_are_distributed_across_duration():
+def test_equal_speech_blocks_split_duration_evenly():
     items = [
         ManyLingoItem(
             word="house",
@@ -119,6 +119,22 @@ def test_manylingo_items_are_distributed_across_duration():
     timed = _timed_items(items, 10.0)
     assert timed[0][1:] == (0.0, 5.0)
     assert timed[1][1:] == (5.0, 10.0)
+
+
+def test_longer_spoken_block_gets_more_screen_time():
+    items = [
+        ManyLingoItem(word="house", sentence="This house is big."),
+        ManyLingoItem(
+            word="living room",
+            sentence="We watch television together in the living room every evening.",
+        ),
+    ]
+    timed = _timed_items(items, 10.0)
+    first_duration = timed[0][2] - timed[0][1]
+    second_duration = timed[1][2] - timed[1][1]
+    assert second_duration > first_duration
+    assert timed[0][1] == 0.0
+    assert timed[-1][2] == 10.0
 
 
 def test_explicit_manylingo_timing_is_preserved():
