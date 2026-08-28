@@ -113,7 +113,9 @@ def build_params(
         video_aspect=VideoAspect.portrait.value,
         video_concat_mode=VideoConcatMode.sequential.value,
         match_materials_to_script=True,
-        video_clip_duration=4,
+        # Keep the first pass through all vocabulary scenes short. The ManyLingo
+        # post-render step then stretches each scene to its spoken block duration.
+        video_clip_duration=2,
         video_count=1,
         video_source=video_source,
         video_language="en-US",
@@ -246,7 +248,7 @@ with st.container(border=True):
         index=source_options.index(configured_source),
     )
     st.caption(
-        "O vídeo é sempre 9:16, busca as cenas na ordem das palavras e desativa a legenda normal para não duplicar o texto didático."
+        "O vídeo é 9:16. Cada palavra recebe sua própria cena em ordem; depois a cena é ajustada à duração estimada da fala daquele bloco."
     )
 
     if st.button("Gerar vídeo ManyLingo", type="primary", use_container_width=True):
