@@ -1,76 +1,31 @@
 """Opt-in ManyLingo educational short-video helpers.
 
-The first integration deliberately avoids changing MoneyPrinterTurbo's central VideoParams
-schema. A task enters ManyLingo mode when ``video_subject`` starts with ``[ManyLingo]``.
-The ``video_script`` is then interpreted as one vocabulary item per line:
-
-    house | This house is big. | Esta casa es grande.
-    living room | We watch TV in the living room. | Vemos televisión en la sala.
-
-This keeps the normal rendering path untouched and gives us a safe base for adding a nicer
-WebUI editor later.
+ManyLingo data is kept separate from ``video_script`` so TTS only reads the intended
+English narration. The normal MoneyPrinterTurbo renderer remains untouched; when
+``content_mode == 'manylingo'`` a small wrapper adds the educational visual layer after the
+standard render completes.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from typing import Iterable
 
 from loguru import logger
 from moviepy import CompositeVideoClip, TextClip, VideoFileClip
 
-from app.models.schema import VideoParams
+from app.models.schema import ManyLingoItem, VideoParams
 from app.utils import utils
 
-MANYLINGO_PREFIX = "[manylingo]"
-DEFAULT_WATERMARK = "manylingo.com"
-DEFAULT_CTA = "Aprende inglés todos los días\nmanylingo.com\nComenta MANYLINGO para recibir el enlace"
-DEFAULT_CTA_DURATION = 2.5
-
-
-@dataclass(frozen=True)
-class ManyLingoItem:
-    word: str
-    sentence: str = ""
-    translation: str = ""
-    start: float = 0.0
-    end: float | None = None
+DEFAULT_CTA = (
+    "Aprende inglés todos los días\n"
+    "manylingo.com\n"
+    "Comenta MANYLINGO para recibir el enlace"
+)
 
 
 def is_manylingo_mode(params: VideoParams) -> bool:
-    subject = str(getattr(params, "video_subject", "") or "").strip().lower()
-    return subject.startswith(MANYLINGO_PREFIX)
-
-
-def clean_manylingo_subject(subject: str) -> str:
-    value = str(subject or "").strip()
-    if value.lower().startswith(MANYLINGO_PREFIX):
-        return value[len(MANYLINGO_PREFIX) :].strip(" :-")
-    return value
-
-
-def parse_manylingo_items(script: str) -> list[ManyLingoItem]:
-    """Parse ``word | sentence | translation`` lines into structured vocabulary items."""
-    items: list[ManyLingoItem] = []
-    for raw_line in str(script or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = [part.strip() for part in line.split("|", 2)]
-        word = parts[0]
-        if not word:
-            continue
-        sentence = parts[1] if len(parts) > 1 else ""
-        translation = parts[2] if len(parts) > 2 else ""
-        items.append(
-            ManyLingoItem(
-                word=word,
-                sentence=sentence,
-                translation=translation,
-            )
-        )
-    return items
+    return getattr(params, "content_mode", "standard") == "manylingo"
 
 
 def _timed_items(
@@ -132,11 +87,11 @@ def apply_manylingo_overlays(
     *,
     items: Iterable[ManyLingoItem],
     font_path: str,
-    watermark: str = DEFAULT_WATERMARK,
-    cta: str = DEFAULT_CTA,
-    cta_duration: float = DEFAULT_CTA_DURATION,
+    watermark: str = "manylingo.com",
+    cta: str = "",
+    cta_duration: float = 2.5,
 ):
-    """Overlay vocabulary, example, translation, watermark and final CTA."""
+    """Overlay vocabulary, example, translation, watermark and optional final CTA."""
     width, height = video_clip.size
     duration = float(video_clip.duration or 0)
     overlays = []
@@ -213,12 +168,9 @@ def render_manylingo_output(output_file: str, params: VideoParams) -> None:
     if not is_manylingo_mode(params):
         return
 
-    items = parse_manylingo_items(getattr(params, "video_script", ""))
+    items = list(getattr(params, "manylingo_items", []) or [])
     if not items:
-        raise ValueError(
-            "ManyLingo mode requires video_script lines in the format "
-            "'word | sentence | translation'."
-        )
+        raise ValueError("ManyLingo mode requires at least one manylingo_items entry.")
 
     font_name = getattr(params, "font_name", "") or "STHeitiMedium.ttc"
     font_path = os.path.join(utils.font_dir(), font_name)
@@ -233,6 +185,9 @@ def render_manylingo_output(output_file: str, params: VideoParams) -> None:
             source,
             items=items,
             font_path=font_path,
+            watermark=getattr(params, "manylingo_watermark", "manylingo.com"),
+            cta=getattr(params, "manylingo_cta", ""),
+            cta_duration=getattr(params, "manylingo_cta_duration", 2.5),
         )
         composed.write_videofile(
             temp_file,
