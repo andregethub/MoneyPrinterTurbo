@@ -19,6 +19,15 @@ from app.models.schema import (  # noqa: E402
 )
 from app.services import state as sm  # noqa: E402
 from app.services import webui_task  # noqa: E402
+from app.services.manylingo import (  # noqa: E402
+    build_narration,
+    generate_manylingo_items,
+    items_to_editor_text,
+)
+
+DEFAULT_WORDS = """house
+living room
+bedroom"""
 
 DEFAULT_ITEMS = """house | This house is big. | Esta casa es grande. | large house exterior
 living room | We watch TV in the living room. | Vemos televisión en la sala. | family watching television in living room
@@ -31,7 +40,6 @@ Comenta MANYLINGO para recibir el enlace"""
 
 def parse_items(raw_text: str):
     items = []
-    narration_parts = []
     search_terms = []
 
     for line_number, raw_line in enumerate(str(raw_text or "").splitlines(), start=1):
@@ -57,19 +65,12 @@ def parse_items(raw_text: str):
             search_term=search_term or word,
         )
         items.append(item)
-
-        narration_parts.append(word)
-        if sentence:
-            narration_parts.append(sentence)
         search_terms.append(item.search_term or item.word)
 
     if not items:
         raise ValueError("Adicione pelo menos uma palavra.")
 
-    narration = ". ".join(part.rstrip(".?!") for part in narration_parts if part).strip()
-    if narration:
-        narration += "."
-    return items, narration, search_terms
+    return items, build_narration(items), search_terms
 
 
 def _configured_voice_name() -> str:
@@ -166,20 +167,54 @@ st.set_page_config(
     layout="wide",
 )
 
+if "manylingo_editor_text" not in st.session_state:
+    st.session_state["manylingo_editor_text"] = DEFAULT_ITEMS
+
 st.title("ManyLingo Video Mode")
 st.caption(
-    "Modo separado para criar Shorts/Reels/TikToks de vocabulário sem alterar o fluxo normal do MoneyPrinterTurbo."
+    "Cole palavras, deixe a IA criar frases/traduções/cenas, revise e gere um Short/Reel/TikTok vertical."
 )
 
 with st.container(border=True):
-    st.subheader("Conteúdo")
+    st.subheader("1. Palavras")
     subject = st.text_input("Tema", value="English vocabulary: Home")
+    words_text = st.text_area(
+        "Uma palavra ou expressão por linha",
+        value=DEFAULT_WORDS,
+        height=120,
+        help="Você também pode separar as palavras por vírgula ou ponto e vírgula. Máximo de 20 por geração.",
+    )
+    translation_language = st.selectbox(
+        "Idioma da tradução",
+        options=["Spanish", "Portuguese", "French", "German", "Italian"],
+        index=0,
+    )
+
+    if st.button("✨ Criar frases e cenas com IA", use_container_width=True):
+        try:
+            with st.spinner("Criando frases, traduções e termos visuais..."):
+                generated_items = generate_manylingo_items(
+                    words_text,
+                    translation_language=translation_language,
+                )
+        except Exception as exc:
+            st.error(f"Não foi possível gerar o conteúdo com IA: {exc}")
+        else:
+            st.session_state["manylingo_editor_text"] = items_to_editor_text(
+                generated_items
+            )
+            st.success(
+                f"Conteúdo criado para {len(generated_items)} palavra(s). Revise abaixo antes de gerar o vídeo."
+            )
+
+with st.container(border=True):
+    st.subheader("2. Revisar conteúdo")
     items_text = st.text_area(
-        "Palavras e frases",
-        value=DEFAULT_ITEMS,
-        height=180,
+        "Palavra | frase em inglês | tradução | termo visual",
+        key="manylingo_editor_text",
+        height=200,
         help=(
-            "Uma linha por item: palavra | frase em inglês | tradução em espanhol | termo de busca do vídeo"
+            "Você pode editar qualquer frase, tradução ou termo de busca antes da geração."
         ),
     )
     st.code(
@@ -188,7 +223,7 @@ with st.container(border=True):
     )
 
 with st.container(border=True):
-    st.subheader("Marca e CTA")
+    st.subheader("3. Marca e CTA")
     watermark = st.text_input("Marca d'água", value="manylingo.com")
     cta = st.text_area("CTA final", value=DEFAULT_CTA, height=110)
     cta_duration = st.slider(
@@ -196,7 +231,7 @@ with st.container(border=True):
     )
 
 with st.container(border=True):
-    st.subheader("Geração")
+    st.subheader("4. Gerar vídeo")
     configured_voice = _configured_voice_name()
     voice_name = st.text_input(
         "Voz TTS",
@@ -211,7 +246,7 @@ with st.container(border=True):
         index=source_options.index(configured_source),
     )
     st.caption(
-        "O vídeo é sempre vertical 9:16, usa os termos de busca na mesma ordem do vocabulário e desativa a legenda normal para não duplicar o texto didático."
+        "O vídeo é sempre 9:16, busca as cenas na ordem das palavras e desativa a legenda normal para não duplicar o texto didático."
     )
 
     if st.button("Gerar vídeo ManyLingo", type="primary", use_container_width=True):
