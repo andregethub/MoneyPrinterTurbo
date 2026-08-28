@@ -1,5 +1,4 @@
 from app.models.schema import ManyLingoItem, VideoParams
-from app.services import manylingo
 from app.services.manylingo import (
     _timed_items,
     build_narration,
