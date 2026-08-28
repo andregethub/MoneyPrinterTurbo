@@ -63,6 +63,15 @@ class MaterialInfo:
     source_info: Optional[dict[str, Any]] = None
 
 
+class ManyLingoItem(BaseModel):
+    word: str = Field(min_length=1, max_length=120)
+    sentence: str = Field(default="", max_length=500)
+    translation: str = Field(default="", max_length=500)
+    search_term: str = Field(default="", max_length=300)
+    start: float = Field(default=0.0, ge=0)
+    end: Optional[float] = Field(default=None, gt=0)
+
+
 class VideoParams(BaseModel):
     """
     {
@@ -81,6 +90,11 @@ class VideoParams(BaseModel):
     video_subject: str
     video_script: str = ""  # Script used to generate the video
     video_terms: Optional[str | list] = None  # Keywords used to generate the video
+    content_mode: Literal["standard", "manylingo"] = "standard"
+    manylingo_items: List[ManyLingoItem] = Field(default_factory=list)
+    manylingo_watermark: str = Field(default="manylingo.com", max_length=120)
+    manylingo_cta: str = Field(default="", max_length=500)
+    manylingo_cta_duration: float = Field(default=2.5, ge=0, le=10)
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
@@ -371,7 +385,7 @@ class TaskQueryResponse(BaseResponse):
 
 
 class TaskListResponse(BaseResponse):
-    """任务列表使用独立响应模型，避免与单任务查询混用文档结构。"""
+    """分页任务列表使用独立响应模型，避免与单任务查询混用文档结构。"""
 
     data: TaskListData
 
