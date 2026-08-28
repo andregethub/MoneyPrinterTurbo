@@ -1,34 +1,40 @@
-from app.models.schema import VideoParams
-from app.services.manylingo import (
-    ManyLingoItem,
-    _timed_items,
-    clean_manylingo_subject,
-    is_manylingo_mode,
-    parse_manylingo_items,
-)
+from app.models.schema import ManyLingoItem, VideoParams
+from app.services.manylingo import _timed_items, is_manylingo_mode
 
 
 def test_standard_mode_stays_unchanged():
     params = VideoParams(video_subject="A normal video")
+    assert params.content_mode == "standard"
+    assert params.manylingo_items == []
+    assert params.manylingo_watermark == "manylingo.com"
     assert is_manylingo_mode(params) is False
 
 
-def test_manylingo_mode_uses_subject_prefix():
-    params = VideoParams(video_subject="[ManyLingo] Home vocabulary")
-    assert is_manylingo_mode(params) is True
-    assert clean_manylingo_subject(params.video_subject) == "Home vocabulary"
-
-
-def test_manylingo_script_parser():
-    items = parse_manylingo_items(
-        "house | This house is big. | Esta casa es grande.\n"
-        "living room | We watch TV in the living room. | Vemos televisión en la sala."
+def test_manylingo_mode_is_opt_in():
+    params = VideoParams(
+        video_subject="Home vocabulary",
+        content_mode="manylingo",
+        manylingo_items=[ManyLingoItem(word="house")],
     )
-    assert len(items) == 2
-    assert items[0].word == "house"
-    assert items[0].sentence == "This house is big."
-    assert items[0].translation == "Esta casa es grande."
-    assert items[1].word == "living room"
+    assert is_manylingo_mode(params) is True
+
+
+def test_manylingo_item_keeps_visual_data_separate_from_narration():
+    item = ManyLingoItem(
+        word="house",
+        sentence="This house is big.",
+        translation="Esta casa es grande.",
+        search_term="large house exterior",
+    )
+    params = VideoParams(
+        video_subject="Home vocabulary",
+        video_script="House. This house is big.",
+        content_mode="manylingo",
+        manylingo_items=[item],
+    )
+    assert params.video_script == "House. This house is big."
+    assert params.manylingo_items[0].translation == "Esta casa es grande."
+    assert params.manylingo_items[0].search_term == "large house exterior"
 
 
 def test_manylingo_items_are_distributed_across_duration():
