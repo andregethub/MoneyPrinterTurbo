@@ -1,4 +1,5 @@
 from app.services import manylingo_curriculum as curriculum
+from app.services.manylingo_content_safety import safe_visual_term
 
 
 def test_parse_cefr_text_preserves_source_level():
@@ -62,3 +63,8 @@ def test_group_ids_are_stable_and_level_scoped():
     assert [group["video_id"] for group in first] == [group["video_id"] for group in second]
     assert first[0]["video_id"].startswith("A1-")
     assert first[-1]["video_id"].startswith("A2-")
+
+
+def test_sensitive_vocabulary_does_not_become_stock_search_query():
+    assert safe_visual_term("weapon", "weapon close up") == "English vocabulary lesson neutral background"
+    assert safe_visual_term("house", "large house exterior") == "large house exterior"
