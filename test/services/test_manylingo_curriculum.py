@@ -12,11 +12,20 @@ travel v., n.
 """
     entries = curriculum.parse_cefr_text(text, source="fixture")
     assert [(item["word"], item["level"]) for item in entries] == [
-        ("house", "A1"),
-        ("kitchen", "A1"),
-        ("ability", "A2"),
-        ("travel", "A2"),
+        ("house", "A1"), ("kitchen", "A1"), ("ability", "A2"), ("travel", "A2")
     ]
+
+
+def test_deduplicate_headwords_keeps_earliest_official_level():
+    entries = [
+        {"word": "address", "level": "A1", "pos": "n."},
+        {"word": "address", "level": "B2", "pos": "v."},
+        {"word": "house", "level": "A1", "pos": "n."},
+    ]
+    result = curriculum.deduplicate_headwords(entries)
+    address = next(item for item in result if item["word"] == "address")
+    assert len(result) == 2
+    assert address["level"] == "A1"
 
 
 def test_topic_classifier_groups_obvious_semantic_words():
