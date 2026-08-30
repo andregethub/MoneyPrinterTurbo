@@ -11,13 +11,22 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
-from app.services import manylingo_queue
-from app.services.manylingo import generate_manylingo_items
-from app.services.manylingo_content_safety import safe_visual_term
-from app.services.manylingo_curriculum import build_fixed_groups, curriculum_to_import_text, parse_cefr_text
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.services import manylingo_queue  # noqa: E402
+from app.services.manylingo import generate_manylingo_items  # noqa: E402
+from app.services.manylingo_content_safety import safe_visual_term  # noqa: E402
+from app.services.manylingo_curriculum import (  # noqa: E402
+    build_fixed_groups,
+    curriculum_to_import_text,
+    parse_cefr_text,
+)
 
 
 def extract_pdf_text(path: str | Path) -> str:
