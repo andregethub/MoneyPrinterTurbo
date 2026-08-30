@@ -14,11 +14,9 @@ from typing import Iterable
 
 CEFR_LEVELS = ("A1", "A2", "B1", "B2", "C1", "C2")
 
-# Broad teaching topics. The classifier is deterministic and free: it is meant to
-# produce a useful first pass without an LLM. Users can edit topics before import.
 TOPIC_WORDS = {
     "Home": "apartment bath bathroom bed bedroom chair closet cupboard desk door floor furniture garage garden home house kitchen room shower sofa table toilet wall window basement carpet cooker corridor blanket".split(),
-    "Food and drink": "apple banana bean beef beer bread breakfast butter cafe cake carrot cheese chicken chocolate coffee cook cooking cream cup dinner dish drink egg food fruit juice lunch meal meat milk onion orange pepper potato restaurant rice salad salt sandwich soup sugar tea tomato vegetable water wine dairy grocery herb protein spice wheat".split(),
+    "Food and drink": "apple banana bean beef bread breakfast butter cafe cake carrot cheese chicken chocolate coffee cook cooking cream cup dinner dish drink egg food fruit juice lunch meal meat milk onion orange pepper potato restaurant rice salad salt sandwich soup sugar tea tomato vegetable water dairy grocery herb protein spice wheat".split(),
     "Family and people": "adult aunt baby boy brother child cousin dad daughter family father girl grandfather grandmother grandparent husband man mother mum parent partner sister son teenager uncle wife woman sibling ancestor".split(),
     "Transport and travel": "airport bicycle bike boat bus car drive driver flight hotel journey passport plane road station taxi ticket traffic train travel trip vacation visa cruise highway rail transportation".split(),
     "School and learning": "class classroom college course dictionary education exam homework language learn lesson library pencil school science student study teacher test textbook university curriculum scholarship seminar thesis".split(),
@@ -55,15 +53,10 @@ def _normalise_space(value: str) -> str:
 
 
 def parse_cefr_text(text: str, source: str = "user-supplied") -> list[dict]:
-    """Parse text copied/extracted from a CEFR-by-level word-list PDF.
-
-    It deliberately requires level headings in the supplied text and never infers
-    CEFR levels. This preserves the source level exactly.
-    """
+    """Parse CEFR rows while preserving the level printed in the supplied source."""
     entries: list[dict] = []
     level: str | None = None
     seen: set[tuple[str, str, str]] = set()
-
     for raw in str(text or "").splitlines():
         line = _normalise_space(raw)
         if not line or line.startswith("©") or "Oxford 3000" in line or "Oxford 5000" in line:
@@ -71,12 +64,8 @@ def parse_cefr_text(text: str, source: str = "user-supplied") -> list[dict]:
         if line in CEFR_LEVELS:
             level = line
             continue
-        if level is None:
+        if level is None or re.fullmatch(r"\d+\s*/\s*\d+", line):
             continue
-        if re.fullmatch(r"\d+\s*/\s*\d+", line):
-            continue
-
-        # Typical source rows end in a compact part-of-speech label.
         match = re.match(
             r"^(?P<word>.+?)\s+(?P<pos>(?:indefinite article|definite article|infinitive marker|"
             r"modal v\.|auxiliary v\.|n\.|v\.|adj\.|adv\.|prep\.|conj\.|pron\.|det\.|"
@@ -89,12 +78,32 @@ def parse_cefr_text(text: str, source: str = "user-supplied") -> list[dict]:
         word = re.sub(r"\d+$", "", match.group("word")).strip(" ,")
         pos = match.group("pos").strip()
         key = (word.casefold(), level, pos.casefold())
-        if not word or key in seen:
-            continue
-        seen.add(key)
-        entries.append({"word": word, "level": level, "pos": pos, "source": source})
-
+        if word and key not in seen:
+            seen.add(key)
+            entries.append({"word": word, "level": level, "pos": pos, "source": source})
     return entries
+
+
+def deduplicate_headwords(entries: Iterable[dict]) -> list[dict]:
+    """Use each surface headword once, at its earliest source CEFR level.
+
+    The CEFR PDFs can repeat one spelling for different parts of speech/levels.
+    Promotional videos teach the headword once, so we retain the earliest official
+    level and merge its part-of-speech labels instead of producing duplicate videos.
+    """
+    rank = {level: index for index, level in enumerate(CEFR_LEVELS)}
+    chosen: dict[str, dict] = {}
+    for raw in entries:
+        item = dict(raw)
+        key = str(item.get("word") or "").casefold()
+        if not key:
+            continue
+        existing = chosen.get(key)
+        if existing is None or rank.get(item.get("level"), 99) < rank.get(existing.get("level"), 99):
+            chosen[key] = item
+        elif item.get("level") == existing.get("level") and item.get("pos") not in str(existing.get("pos") or ""):
+            existing["pos"] = ", ".join(filter(None, [str(existing.get("pos") or ""), str(item.get("pos") or "")]))
+    return list(chosen.values())
 
 
 def classify_topic(word: str, pos: str = "") -> str:
@@ -129,9 +138,8 @@ def build_fixed_groups(entries: Iterable[dict], words_per_video: int = 5) -> lis
     """Create stable same-level, same-topic groups in deterministic order."""
     words_per_video = max(1, int(words_per_video))
     buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for entry in enrich_topics(entries):
+    for entry in enrich_topics(deduplicate_headwords(entries)):
         buckets[(entry["level"], entry["topic"])].append(entry)
-
     groups = []
     counters = defaultdict(int)
     level_rank = {level: index for index, level in enumerate(CEFR_LEVELS)}
@@ -141,50 +149,31 @@ def build_fixed_groups(entries: Iterable[dict], words_per_video: int = 5) -> lis
         items = sorted(items, key=lambda item: item["word"].casefold())
         for start in range(0, len(items), words_per_video):
             chunk = items[start : start + words_per_video]
-            # Keep short remainder groups; merging across topics would destroy semantic coherence.
             counters[level] += 1
             video_id = f"{level}-{counters[level]:04d}"
-            groups.append(
-                {
-                    "video_id": video_id,
-                    "level": level,
-                    "topic": topic,
-                    "status": "pending",
-                    "items": [
-                        {
-                            "order": index,
-                            "word": item["word"],
-                            "pos": item.get("pos", ""),
-                            "sentence": "",
-                            "translation": "",
-                            "search_term": item["word"],
-                        }
-                        for index, item in enumerate(chunk, start=1)
-                    ],
-                }
-            )
+            groups.append({
+                "video_id": video_id,
+                "level": level,
+                "topic": topic,
+                "status": "pending",
+                "items": [
+                    {"order": index, "word": item["word"], "pos": item.get("pos", ""),
+                     "sentence": "", "translation": "", "search_term": item["word"]}
+                    for index, item in enumerate(chunk, start=1)
+                ],
+            })
     return groups
 
 
 def curriculum_to_import_text(groups: Iterable[dict]) -> str:
-    """Serialize groups into the extended format accepted by manylingo_queue."""
     lines = []
     for group in groups:
         for item in group["items"]:
-            lines.append(
-                " | ".join(
-                    [
-                        group["video_id"],
-                        group["level"],
-                        group["topic"],
-                        str(item["order"]),
-                        item["word"],
-                        item.get("sentence", ""),
-                        item.get("translation", ""),
-                        item.get("search_term", item["word"]),
-                    ]
-                )
-            )
+            lines.append(" | ".join([
+                group["video_id"], group["level"], group["topic"], str(item["order"]),
+                item["word"], item.get("sentence", ""), item.get("translation", ""),
+                item.get("search_term", item["word"]),
+            ]))
     return "\n".join(lines)
 
 
