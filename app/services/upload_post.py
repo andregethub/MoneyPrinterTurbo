@@ -87,9 +87,7 @@ class UploadPostService:
             return {"success": False, "error": "No Upload-Post platforms configured"}
 
         if "pinterest" in platforms:
-            board_id = str(
-                platform_extra.get("pinterest_board_id") or self.pinterest_board_id
-            ).strip()
+            board_id = str(platform_extra.get("pinterest_board_id") or self.pinterest_board_id).strip()
             if not board_id:
                 return {
                     "success": False,
@@ -108,7 +106,6 @@ class UploadPostService:
         try:
             with open(video_path, "rb") as video_file:
                 files = {"video": video_file}
-
                 data = [
                     ("user", self.username),
                     ("title", title[:2200]),
@@ -125,23 +122,14 @@ class UploadPostService:
                         data.append(("youtube_description", youtube_extra["youtube_description"]))
                     for tag in youtube_extra.get("tags", []):
                         data.append(("tags[]", tag))
-                    data.append(
-                        (
-                            "privacyStatus",
-                            youtube_extra.get("privacyStatus", self.youtube_privacy_status),
-                        )
-                    )
+                    data.append(("privacyStatus", youtube_extra.get("privacyStatus", self.youtube_privacy_status)))
                     data.append(("containsSyntheticMedia", "true"))
                     if youtube_extra.get("defaultLanguage"):
                         data.append(("defaultLanguage", youtube_extra["defaultLanguage"]))
                     if youtube_extra.get("defaultAudioLanguage"):
-                        data.append(
-                            ("defaultAudioLanguage", youtube_extra["defaultAudioLanguage"])
-                        )
+                        data.append(("defaultAudioLanguage", youtube_extra["defaultAudioLanguage"]))
                     if youtube_extra.get("youtube_playlist_id"):
-                        data.append(
-                            ("youtube_playlist_id", youtube_extra["youtube_playlist_id"])
-                        )
+                        data.append(("youtube_playlist_id", youtube_extra["youtube_playlist_id"]))
 
                 if "x" in platforms:
                     data.append(("made_with_ai", "true"))
@@ -149,25 +137,13 @@ class UploadPostService:
                         data.append(("x_title", str(platform_extra["x_title"])[:280]))
 
                 if "pinterest" in platforms:
-                    board_id = str(
-                        platform_extra.get("pinterest_board_id")
-                        or self.pinterest_board_id
-                    ).strip()
+                    board_id = str(platform_extra.get("pinterest_board_id") or self.pinterest_board_id).strip()
                     data.append(("pinterest_board_id", board_id))
-                    data.append(
-                        (
-                            "pinterest_title",
-                            str(platform_extra.get("pinterest_title") or title)[:100],
-                        )
-                    )
-                    description = str(
-                        platform_extra.get("pinterest_description") or title
-                    ).strip()
+                    data.append(("pinterest_title", str(platform_extra.get("pinterest_title") or title)[:100]))
+                    description = str(platform_extra.get("pinterest_description") or title).strip()
                     if description:
                         data.append(("pinterest_description", description[:800]))
-                    link = str(
-                        platform_extra.get("pinterest_link") or self.pinterest_link
-                    ).strip()
+                    link = str(platform_extra.get("pinterest_link") or self.pinterest_link).strip()
                     if link:
                         data.append(("pinterest_link", link))
                     alt_text = str(platform_extra.get("pinterest_alt_text") or "").strip()
@@ -175,7 +151,6 @@ class UploadPostService:
                         data.append(("pinterest_alt_text", alt_text[:500]))
 
                 headers = {"Authorization": f"Apikey {self.api_key}"}
-
                 response = requests.post(
                     f"{self.API_BASE}/api/upload",
                     headers=headers,
@@ -183,19 +158,13 @@ class UploadPostService:
                     files=files,
                     timeout=300,
                 )
-
                 response.raise_for_status()
                 result = response.json()
 
                 if result.get("success"):
-                    logger.info(
-                        f"✅ Video cross-posted successfully! Request ID: {result.get('request_id')}"
-                    )
+                    logger.info(f"✅ Video cross-posted successfully! Request ID: {result.get('request_id')}")
                 else:
-                    logger.warning(
-                        f"Cross-post failed: {result.get('message', 'Unknown error')}"
-                    )
-
+                    logger.warning(f"Cross-post failed: {result.get('message', 'Unknown error')}")
                 return result
 
         except requests.exceptions.RequestException as e:
@@ -206,23 +175,19 @@ class UploadPostService:
         """Check the status of an upload request."""
         try:
             headers = {"Authorization": f"Apikey {self.api_key}"}
-
             response = requests.get(
                 f"{self.API_BASE}/api/uploadposts/status",
                 params={"request_id": request_id},
                 headers=headers,
                 timeout=30,
             )
-
             response.raise_for_status()
             return response.json()
-
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to check status: {str(e)}")
             return {"success": False, "error": str(e)}
 
 
-# Singleton instance
 upload_post_service = UploadPostService()
 
 
