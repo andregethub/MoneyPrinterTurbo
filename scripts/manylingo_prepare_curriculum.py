@@ -1,14 +1,9 @@
 """Prepare the local ManyLingo curriculum from user-supplied CEFR PDFs.
 
-Usage example (run locally; PDFs are not committed):
-    python scripts/manylingo_prepare_curriculum.py \
-      --oxford-3000 /path/to/The_Oxford_3000_by_CEFR_level.pdf \
-      --oxford-5000 /path/to/The_Oxford_5000_by_CEFR_level.pdf \
-      --enrich --import-store
-
-`pdftotext` (Poppler) is used so no Python PDF dependency is added. The script
-checkpoints after every enriched group. Daily video generation then reads the
-saved fixed curriculum and does not call the LLM for content creation.
+Run locally with the two user-supplied PDFs. The PDFs and extracted word list are
+not committed. `pdftotext` (Poppler) avoids adding a Python PDF dependency.
+The optional enrichment step runs once and checkpoints every completed group;
+daily video generation then reuses the saved content without LLM calls.
 """
 
 from __future__ import annotations
@@ -21,11 +16,8 @@ from pathlib import Path
 
 from app.services import manylingo_queue
 from app.services.manylingo import generate_manylingo_items
-from app.services.manylingo_curriculum import (
-    build_fixed_groups,
-    curriculum_to_import_text,
-    parse_cefr_text,
-)
+from app.services.manylingo_content_safety import safe_visual_term
+from app.services.manylingo_curriculum import build_fixed_groups, curriculum_to_import_text, parse_cefr_text
 
 
 def extract_pdf_text(path: str | Path) -> str:
@@ -34,16 +26,9 @@ def extract_pdf_text(path: str | Path) -> str:
         raise FileNotFoundError(source)
     with tempfile.NamedTemporaryFile(suffix=".txt") as temp:
         try:
-            subprocess.run(
-                ["pdftotext", "-raw", str(source), temp.name],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            subprocess.run(["pdftotext", "-raw", str(source), temp.name], check=True, capture_output=True, text=True)
         except FileNotFoundError as exc:
-            raise RuntimeError(
-                "pdftotext não foi encontrado. Instale o Poppler ou exporte o PDF para texto."
-            ) from exc
+            raise RuntimeError("pdftotext não foi encontrado. Instale o Poppler ou exporte o PDF para texto.") from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(exc.stderr or "Falha ao extrair texto do PDF.") from exc
         return Path(temp.name).read_text(encoding="utf-8", errors="replace")
@@ -62,7 +47,6 @@ def enrich_groups(groups: list[dict], checkpoint: Path, translation_language: st
         saved = json.loads(checkpoint.read_text(encoding="utf-8"))
         by_id = {group["video_id"]: group for group in saved}
         groups = [by_id.get(group["video_id"], group) for group in groups]
-
     for index, group in enumerate(groups, start=1):
         if all(item.get("sentence") and item.get("translation") for item in group["items"]):
             continue
@@ -73,7 +57,7 @@ def enrich_groups(groups: list[dict], checkpoint: Path, translation_language: st
             generated_item = generated_by_word[item["word"].casefold()]
             item["sentence"] = generated_item.sentence
             item["translation"] = generated_item.translation
-            item["search_term"] = generated_item.search_term or item["word"]
+            item["search_term"] = safe_visual_term(item["word"], generated_item.search_term)
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
         checkpoint.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[{index}/{len(groups)}] pronto: {group['video_id']} · {group['topic']}")
@@ -95,10 +79,10 @@ def main() -> None:
     groups = build_fixed_groups(entries, words_per_video=args.words_per_video)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-
-    print(f"Entradas extraídas: {len(entries)}")
+    print(f"Entradas CEFR lidas: {len(entries)}")
     print(f"Grupos planejados: {len(groups)}")
-    print("Níveis preservados da fonte; temas e grupos são uma classificação ManyLingo.")
+    print("Headwords repetidos são ensinados uma vez no primeiro nível CEFR oficial em que aparecem.")
+    print("Níveis vêm da fonte; temas e agrupamentos são organização ManyLingo.")
 
     if args.enrich:
         groups = enrich_groups(groups, output, args.translation_language)
@@ -110,7 +94,6 @@ def main() -> None:
             raise RuntimeError("Use --enrich antes de --import-store para preencher frases e traduções.")
         result = manylingo_queue.import_preplanned_curriculum(curriculum_to_import_text(groups))
         print(f"Importado: {result['groups']} grupos / {result['rows']} itens.")
-
     print(f"Currículo salvo em: {output}")
 
 
