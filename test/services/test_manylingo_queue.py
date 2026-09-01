@@ -1,3 +1,5 @@
+import pytest
+
 from app.services import manylingo_queue as queue
 
 
@@ -74,3 +76,46 @@ def test_preplanned_group_is_reused_only_after_less_used_groups(monkeypatch, tmp
     queue.create_job(task_id="task-1", group=first, items=first["items"], subject="test", narration="test")
     second = queue.plan_word_groups(level="A1", video_count=1, words_per_video=5)[0]
     assert second["group_id"] != first["group_id"]
+
+
+def test_active_preplanned_group_cannot_be_queued_twice(monkeypatch, tmp_path):
+    _use_temp_store(monkeypatch, tmp_path)
+    queue.import_preplanned_curriculum(
+        "A1-0001 | A1 | Home | 1 | house | This house is big. | Esta casa es grande. | large suburban house exterior"
+    )
+    group = queue.plan_word_groups(level="A1", video_count=1, words_per_video=5)[0]
+    queue.create_job(task_id="task-1", group=group, items=group["items"], subject="test", narration="test")
+    with pytest.raises(ValueError, match="já está em geração"):
+        queue.create_job(task_id="task-2", group=group, items=group["items"], subject="test", narration="test")
+
+
+def test_restart_marks_orphaned_generation_as_failed(monkeypatch, tmp_path):
+    _use_temp_store(monkeypatch, tmp_path)
+    queue.import_preplanned_curriculum(
+        "A1-0001 | A1 | Home | 1 | house | This house is big. | Esta casa es grande. | large suburban house exterior"
+    )
+    group = queue.plan_word_groups(level="A1", video_count=1, words_per_video=5)[0]
+    queue.create_job(task_id="old-task", group=group, items=group["items"], subject="test", narration="test")
+    monkeypatch.setattr(queue.sm.state, "get_task", lambda task_id: None)
+    monkeypatch.setattr(queue, "_discover_video_paths", lambda task_id: [])
+
+    jobs = queue.refresh_jobs()
+
+    assert jobs[0]["status"] == "failed"
+    assert "interrompida" in jobs[0]["error"].lower()
+
+
+def test_finished_video_on_disk_moves_job_to_review(monkeypatch, tmp_path):
+    _use_temp_store(monkeypatch, tmp_path)
+    queue.import_preplanned_curriculum(
+        "A1-0001 | A1 | Home | 1 | house | This house is big. | Esta casa es grande. | large suburban house exterior"
+    )
+    group = queue.plan_word_groups(level="A1", video_count=1, words_per_video=5)[0]
+    queue.create_job(task_id="finished-task", group=group, items=group["items"], subject="test", narration="test")
+    monkeypatch.setattr(queue.sm.state, "get_task", lambda task_id: None)
+    monkeypatch.setattr(queue, "_discover_video_paths", lambda task_id: ["final-1.mp4"])
+
+    jobs = queue.refresh_jobs()
+
+    assert jobs[0]["status"] == "review"
+    assert jobs[0]["video_paths"] == ["final-1.mp4"]
