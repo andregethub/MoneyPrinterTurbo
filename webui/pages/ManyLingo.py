@@ -18,13 +18,13 @@ from app.services import state as sm, upload_post, webui_task  # noqa: E402
 from app.services.manylingo import build_narration, generate_manylingo_items, items_to_editor_text  # noqa: E402
 
 DEFAULT_WORDS = "house\nliving room\nbedroom"
-DEFAULT_ITEMS = """house | This house is big. | Esta casa es grande. | large house exterior
+DEFAULT_ITEMS = """house | This house is big. | Esta casa es grande. | large suburban house exterior
 living room | We watch TV in the living room. | Vemos televisión en la sala. | family watching television in living room
 bedroom | The bedroom is quiet. | El dormitorio es tranquilo. | cozy bedroom interior"""
 DEFAULT_CTA = "Aprende inglés con ManyLingo\nmanylingo.com"
 DEFAULT_VOCAB_IMPORT = "house | A1 | Home\nliving room | A1 | Home\nbedroom | A1 | Home"
 DEFAULT_PLAN_IMPORT = """# video_id | nível | tema | ordem | palavra | frase | tradução | termo visual
-A1-0001 | A1 | Home | 1 | house | This house is very big. | Esta casa es muy grande. | large house exterior
+A1-0001 | A1 | Home | 1 | house | This house is very big. | Esta casa es muy grande. | large suburban house exterior
 A1-0001 | A1 | Home | 2 | bedroom | My bedroom is upstairs. | Mi dormitorio está arriba. | cozy bedroom interior
 A1-0001 | A1 | Home | 3 | bathroom | The bathroom is next to my room. | El baño está al lado de mi habitación. | modern bathroom interior"""
 
@@ -67,6 +67,20 @@ def _font():
 def _source():
     source = str(config.app.get("video_source", "pexels") or "pexels").strip()
     return source if source in {"pexels", "pixabay"} else "pexels"
+
+
+def _ensure_group_available(group: dict) -> None:
+    group_id = str(group.get("group_id") or "").strip()
+    if not group_id:
+        return
+    for job in ml_queue.refresh_jobs():
+        if (
+            str(job.get("group_id") or "") == group_id
+            and str(job.get("status") or "") in {"queued", "generating"}
+        ):
+            raise ValueError(
+                f"O grupo {group_id} já está em geração. Aguarde a conclusão ou remova a tarefa interrompida."
+            )
 
 
 def build_params(
@@ -112,6 +126,7 @@ def build_params(
 def _submit_group(
     *, group, translation_language, watermark, cta, cta_duration, voice_name, video_source
 ):
+    _ensure_group_available(group)
     if group.get("items"):
         items = [ManyLingoItem(**item) for item in group["items"]]
     else:
@@ -134,7 +149,6 @@ def _submit_group(
         aspect=VideoAspect.portrait.value,
     )
     task_id = str(uuid4())
-    webui_task.submit_generation(task_id=task_id, params=params, capture_logs=True)
     ml_queue.create_job(
         task_id=task_id,
         group=group,
@@ -142,12 +156,23 @@ def _submit_group(
         subject=subject,
         narration=narration,
     )
+    try:
+        webui_task.submit_generation(task_id=task_id, params=params, capture_logs=True)
+    except Exception as exc:
+        matching = next(
+            (job for job in ml_queue.list_jobs(limit=200) if job.get("task_id") == task_id),
+            None,
+        )
+        if matching:
+            ml_queue.set_job_status(matching["id"], "failed", error=str(exc))
+        raise
     return task_id
 
 
 def _submit_horizontal(
     *, group, watermark, cta, cta_duration, voice_name, video_source
 ):
+    _ensure_group_available(group)
     items = [ManyLingoItem(**item) for item in group["items"]]
     narration = build_narration(items)
     terms = [item.search_term or item.word for item in items]
@@ -168,7 +193,6 @@ def _submit_horizontal(
         aspect=VideoAspect.landscape.value,
     )
     task_id = str(uuid4())
-    webui_task.submit_generation(task_id=task_id, params=params, capture_logs=True)
     job = ml_queue.create_job(
         task_id=task_id,
         group={**group, "vocabulary_ids": []},
@@ -177,6 +201,11 @@ def _submit_horizontal(
         narration=narration,
     )
     distribution.mark_horizontal_job(job["id"], group)
+    try:
+        webui_task.submit_generation(task_id=task_id, params=params, capture_logs=True)
+    except Exception as exc:
+        ml_queue.set_job_status(job["id"], "failed", error=str(exc))
+        raise
     return task_id
 
 
@@ -205,6 +234,10 @@ st.set_page_config(page_title="ManyLingo Video Mode", page_icon="🌎", layout="
 if "manylingo_editor_text" not in st.session_state:
     st.session_state["manylingo_editor_text"] = DEFAULT_ITEMS
 
+# Reconcile persisted queue records with the current in-memory task manager on every page load.
+# After a PC/app restart, orphaned `generating` jobs become `failed` instead of staying stuck forever.
+ml_queue.refresh_jobs()
+
 st.title("ManyLingo Video Mode")
 st.caption(
     "Currículo pré-planejado → TTS → cenas → vídeo → revisão → distribuição. "
@@ -216,11 +249,27 @@ vertical_destinations, distribution_warnings = distribution.vertical_platforms()
 
 with st.container(border=True):
     st.subheader("0. Currículo e automação")
+    all_jobs = ml_queue.list_jobs(limit=200)
+    failed_jobs = [job for job in all_jobs if job.get("status") == "failed"]
     a, b, c, d = st.columns(4)
     a.metric("Palavras", stats["total"])
     b.metric("Não usadas", stats["unused"])
     c.metric("Grupos prontos", stats.get("preplanned_groups", 0))
-    d.metric("Vídeos na fila", len(ml_queue.list_jobs(limit=200)))
+    d.metric("Vídeos na fila", len(all_jobs))
+
+    if failed_jobs:
+        st.warning(
+            f"Há {len(failed_jobs)} tarefa(s) interrompida(s) ou com falha. "
+            "Você pode limpá-las sem apagar o currículo."
+        )
+        if st.button(
+            f"Limpar tarefas interrompidas ({len(failed_jobs)})",
+            use_container_width=True,
+        ):
+            for failed_job in failed_jobs:
+                ml_queue.remove_job(failed_job["id"])
+            st.success("Tarefas interrompidas removidas. O currículo foi preservado.")
+            st.rerun()
 
     with st.expander(
         "Importar currículo pré-planejado",
@@ -376,6 +425,8 @@ with st.container(border=True):
                 video_count=int(batch_count),
                 words_per_video=int(words_per_video),
             )
+            if not groups:
+                raise ValueError("Não há grupos disponíveis: os próximos grupos já estão em geração.")
             progress = st.progress(0)
             for index, group in enumerate(groups, 1):
                 progress.progress(
@@ -505,9 +556,7 @@ def render_queue():
                         st.error(str(exc))
                 if b.button("Refazer", key=f"redo-{job['id']}", use_container_width=True):
                     try:
-                        models = [
-                            ManyLingoItem(**item) for item in job.get("items") or []
-                        ]
+                        models = [ManyLingoItem(**item) for item in job.get("items") or []]
                         narration = build_narration(models)
                         terms = [item.search_term or item.word for item in models]
                         params = build_params(
@@ -520,20 +569,13 @@ def render_queue():
                             cta_duration=cta_duration,
                             voice_name=voice_name.strip(),
                             video_source=video_source,
-                            aspect=(
-                                VideoAspect.landscape.value
-                                if is_landscape
-                                else VideoAspect.portrait.value
-                            ),
+                            aspect=(VideoAspect.landscape.value if is_landscape else VideoAspect.portrait.value),
                         )
                         new_id = str(uuid4())
-                        webui_task.submit_generation(
-                            task_id=new_id, params=params, capture_logs=True
-                        )
                         new_job = ml_queue.create_job(
                             task_id=new_id,
                             group={
-                                "group_id": job.get("group_id"),
+                                "group_id": None,
                                 "level": job.get("level"),
                                 "topic": job.get("topic"),
                                 "words": job.get("words") or [],
@@ -543,21 +585,24 @@ def render_queue():
                             subject=str(job.get("subject") or "ManyLingo vocabulary"),
                             narration=narration,
                         )
+                        webui_task.submit_generation(task_id=new_id, params=params, capture_logs=True)
                         if is_landscape:
                             distribution.mark_horizontal_job(
                                 new_job["id"],
-                                {
-                                    "source_group_ids": job.get("source_group_ids") or [],
-                                },
+                                {"source_group_ids": job.get("source_group_ids") or []},
                             )
-                        ml_queue.set_job_status(
-                            job["id"],
-                            "failed",
-                            error="Substituído por nova geração.",
-                        )
+                        ml_queue.set_job_status(job["id"], "failed", error="Substituído por nova geração.")
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
+            elif status == "failed":
+                if st.button(
+                    "Remover da fila",
+                    key=f"remove-{job['id']}",
+                    use_container_width=True,
+                ):
+                    ml_queue.remove_job(job["id"])
+                    st.rerun()
             elif status == "publishing":
                 st.info("Publicando...")
             elif status == "published":
