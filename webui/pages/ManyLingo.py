@@ -54,7 +54,10 @@ def parse_items(raw_text: str):
 
 
 def _voice():
-    return str(config.ui.get("voice_name", "") or "").strip()
+    configured = str(config.ui.get("voice_name", "") or "").strip()
+    if configured.lower().startswith("en-"):
+        return configured
+    return "en-US-GuyNeural"
 
 
 def _font():
@@ -234,8 +237,6 @@ st.set_page_config(page_title="ManyLingo Video Mode", page_icon="🌎", layout="
 if "manylingo_editor_text" not in st.session_state:
     st.session_state["manylingo_editor_text"] = DEFAULT_ITEMS
 
-# Reconcile persisted queue records with the current in-memory task manager on every page load.
-# After a PC/app restart, orphaned `generating` jobs become `failed` instead of staying stuck forever.
 ml_queue.refresh_jobs()
 
 st.title("ManyLingo Video Mode")
