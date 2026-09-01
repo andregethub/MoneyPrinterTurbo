@@ -1,5 +1,7 @@
 """Service package bootstrap hooks."""
 
 from app.services.manylingo import install_video_patch
+from app.services.manylingo_quality import install_quality_patch
 
+install_quality_patch()
 install_video_patch()
