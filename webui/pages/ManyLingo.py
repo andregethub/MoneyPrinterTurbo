@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ from app.models import const  # noqa: E402
 from app.models.schema import ManyLingoItem, VideoAspect, VideoConcatMode, VideoParams  # noqa: E402
 from app.services import manylingo_distribution as distribution  # noqa: E402
 from app.services import manylingo_queue as ml_queue  # noqa: E402
-from app.services import state as sm, upload_post, voice as voice_service, webui_task  # noqa: E402
+from app.services import state as sm, upload_post, webui_task, voice  # noqa: E402
 from app.services.manylingo import build_narration, generate_manylingo_items, items_to_editor_text  # noqa: E402
 
 DEFAULT_WORDS = "house\nliving room\nbedroom"
@@ -60,23 +61,6 @@ def _voice():
     return "en-US-GuyNeural"
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _elevenlabs_voices():
-    api_key = voice_service.get_elevenlabs_api_key()
-    if not api_key:
-        return []
-    return voice_service.get_elevenlabs_voices(api_key)
-
-
-def _elevenlabs_voice_label(value: str) -> str:
-    parts = str(value or "").split(":", 2)
-    if len(parts) >= 3 and parts[2].strip():
-        return parts[2].strip()
-    if len(parts) >= 2:
-        return parts[1].strip()
-    return str(value or "")
-
-
 def _font():
     return str(
         config.ui.get("font_name", "MicrosoftYaHeiBold.ttc")
@@ -87,6 +71,66 @@ def _font():
 def _source():
     source = str(config.app.get("video_source", "pexels") or "pexels").strip()
     return source if source in {"pexels", "pixabay"} else "pexels"
+
+
+def _elevenlabs_voice_options() -> list[str]:
+    api_key = voice.get_elevenlabs_api_key()
+    if not api_key:
+        return []
+    return voice.get_elevenlabs_voices(api_key)
+
+
+def _voice_label(value: str) -> str:
+    value = str(value or "")
+    if value.startswith("elevenlabs:"):
+        parts = value.split(":", 2)
+        return parts[2] if len(parts) >= 3 else value
+    return value
+
+
+def _safe_delete_task_files(task_id: str) -> tuple[bool, str]:
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return False, "ID da tarefa ausente."
+
+    try:
+        task = sm.state.get_task(task_id)
+    except Exception:
+        task = None
+
+    if task and task.get("state") == const.TASK_STATE_PROCESSING:
+        return False, "Esse vídeo ainda está sendo gerado. Aguarde terminar antes de excluir."
+
+    task_dir = os.path.realpath(os.path.join(root_dir, "storage", "tasks", task_id))
+    tasks_root = os.path.realpath(os.path.join(root_dir, "storage", "tasks"))
+    try:
+        is_task_dir = os.path.commonpath([tasks_root, task_dir]) == tasks_root
+    except ValueError:
+        is_task_dir = False
+    if not is_task_dir:
+        return False, "Caminho da tarefa inválido."
+
+    if os.path.isdir(task_dir):
+        try:
+            shutil.rmtree(task_dir)
+        except Exception as exc:
+            return False, f"Não foi possível apagar os arquivos: {exc}"
+    return True, ""
+
+
+def _delete_job_and_files(job: dict) -> tuple[bool, str]:
+    status = str(job.get("status") or "")
+    if status in {"queued", "generating", "publishing"}:
+        return False, "A tarefa ainda está em andamento e não pode ser excluída agora."
+
+    ok, error = _safe_delete_task_files(str(job.get("task_id") or ""))
+    if not ok:
+        return False, error
+    try:
+        ml_queue.remove_job(job["id"])
+    except Exception as exc:
+        return False, f"Os arquivos foram apagados, mas não foi possível remover o item da fila: {exc}"
+    return True, ""
 
 
 def _ensure_group_available(group: dict) -> None:
@@ -246,8 +290,11 @@ def _task_status(task_id):
     if state != const.TASK_STATE_COMPLETE:
         st.progress(progress, text=f"Gerando vídeo: {progress}%")
         return
-    for path in task.get("videos") or []:
-        st.video(path)
+    for video_path in task.get("videos") or []:
+        if os.path.exists(video_path):
+            _, center, _ = st.columns([1, 1.35, 1])
+            with center:
+                st.video(video_path)
 
 
 st.set_page_config(page_title="ManyLingo Video Mode", page_icon="🌎", layout="wide")
@@ -390,38 +437,23 @@ with st.container(border=True):
     cta = st.text_area("CTA", value=DEFAULT_CTA, height=70)
     cta_duration = st.slider("Duração CTA", 0.0, 6.0, 2.5, 0.5)
 
-    has_elevenlabs = bool(voice_service.get_elevenlabs_api_key())
-    provider_options = ["Edge TTS", "ElevenLabs"] if has_elevenlabs else ["Edge TTS"]
-    provider_default = 1 if has_elevenlabs else 0
+    elevenlabs_voices = _elevenlabs_voice_options()
+    providers = ["Edge TTS"] + (["ElevenLabs"] if elevenlabs_voices else [])
+    default_provider = "ElevenLabs" if elevenlabs_voices else "Edge TTS"
     voice_provider = st.selectbox(
         "Provedor de voz",
-        provider_options,
-        index=provider_default,
+        providers,
+        index=providers.index(default_provider),
     )
     if voice_provider == "ElevenLabs":
-        elevenlabs_voices = _elevenlabs_voices()
-        if elevenlabs_voices:
-            voice_name = st.selectbox(
-                "Voz ElevenLabs",
-                elevenlabs_voices,
-                format_func=_elevenlabs_voice_label,
-            )
-            st.caption(
-                "Sincronização exata ativada: o ManyLingo usa o alinhamento temporal "
-                "fornecido pelo ElevenLabs para trocar as cenas."
-            )
-        else:
-            voice_name = ""
-            st.warning(
-                "A chave ElevenLabs foi encontrada, mas nenhuma voz favorita ficou disponível. "
-                "Marque pelo menos uma voz como favorita no ElevenLabs e atualize esta página."
-            )
-            if st.button("Atualizar vozes ElevenLabs"):
-                _elevenlabs_voices.clear()
-                st.rerun()
+        voice_name = st.selectbox(
+            "Voz ElevenLabs",
+            elevenlabs_voices,
+            format_func=_voice_label,
+        )
+        st.caption("As vozes são carregadas da sua conta ElevenLabs.")
     else:
         voice_name = st.text_input("Voz Edge TTS", value=_voice())
-        st.caption("O Edge TTS continua usando WordBoundary para sincronização exata.")
 
     video_source = st.selectbox(
         "Fonte",
@@ -563,6 +595,7 @@ if current:
 
 st.divider()
 st.subheader("Fila ManyLingo")
+st.caption("Pré-visualizações compactas. Exclua os vídeos que não quiser manter.")
 
 
 @st.fragment(run_every="3s")
@@ -576,27 +609,35 @@ def render_queue():
         is_landscape = job.get("content_format") == "landscape"
         format_label = "YouTube 16:9" if is_landscape else "Vertical"
         with st.container(border=True):
-            st.markdown(
-                f"**{format_label} · {job.get('group_id') or ''} · {job.get('level')} · "
-                f"{job.get('topic')} · {', '.join(job.get('words') or [])}**"
-            )
-            if is_landscape and job.get("source_group_ids"):
-                st.caption("Grupos-fonte: " + ", ".join(job["source_group_ids"]))
-            st.write(f"Status: **{status}**")
-            try:
-                task = sm.state.get_task(str(job.get("task_id") or ""))
-            except Exception:
-                task = None
-            if task and status in {"queued", "generating"}:
-                value = max(0, min(100, int(task.get("progress", 0) or 0)))
-                st.progress(value, text=f"Geração: {value}%")
-            if job.get("error"):
-                st.error(str(job["error"]))
-            for path in job.get("video_paths") or []:
-                if os.path.exists(path):
-                    st.video(path)
+            info_col, preview_col = st.columns([1.35, 1], vertical_alignment="top")
+            with info_col:
+                st.markdown(
+                    f"**{format_label} · {job.get('group_id') or ''} · {job.get('level')} · "
+                    f"{job.get('topic')}**"
+                )
+                words = ", ".join(job.get("words") or [])
+                if words:
+                    st.caption(words)
+                if is_landscape and job.get("source_group_ids"):
+                    st.caption("Grupos-fonte: " + ", ".join(job["source_group_ids"]))
+                st.write(f"Status: **{status}**")
+                try:
+                    task = sm.state.get_task(str(job.get("task_id") or ""))
+                except Exception:
+                    task = None
+                if task and status in {"queued", "generating"}:
+                    value = max(0, min(100, int(task.get("progress", 0) or 0)))
+                    st.progress(value, text=f"Geração: {value}%")
+                if job.get("error"):
+                    st.error(str(job["error"]))
+
+            with preview_col:
+                for video_path in job.get("video_paths") or []:
+                    if os.path.exists(video_path):
+                        st.video(video_path)
+
             if status == "review":
-                a, b = st.columns(2)
+                a, b, c = st.columns(3)
                 if a.button(
                     "Aprovar e publicar", key=f"pub-{job['id']}", use_container_width=True
                 ):
@@ -646,18 +687,51 @@ def render_queue():
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
+                if c.button(
+                    "Excluir vídeo",
+                    key=f"delete-{job['id']}",
+                    use_container_width=True,
+                ):
+                    ok, error = _delete_job_and_files(job)
+                    if ok:
+                        st.success("Vídeo excluído do computador e removido da fila.")
+                        st.rerun()
+                    else:
+                        st.error(error)
             elif status == "failed":
-                if st.button(
+                a, b = st.columns(2)
+                if a.button(
                     "Remover da fila",
                     key=f"remove-{job['id']}",
                     use_container_width=True,
                 ):
                     ml_queue.remove_job(job["id"])
                     st.rerun()
+                if b.button(
+                    "Excluir arquivos",
+                    key=f"delete-failed-{job['id']}",
+                    use_container_width=True,
+                ):
+                    ok, error = _delete_job_and_files(job)
+                    if ok:
+                        st.success("Arquivos da tarefa excluídos.")
+                        st.rerun()
+                    else:
+                        st.error(error)
             elif status == "publishing":
                 st.info("Publicando...")
             elif status == "published":
-                st.success("Publicado.")
+                if st.button(
+                    "Excluir vídeo local",
+                    key=f"delete-published-{job['id']}",
+                    use_container_width=True,
+                ):
+                    ok, error = _delete_job_and_files(job)
+                    if ok:
+                        st.success("Cópia local excluída e item removido da fila.")
+                        st.rerun()
+                    else:
+                        st.error(error)
 
 
 render_queue()
