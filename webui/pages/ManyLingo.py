@@ -14,7 +14,7 @@ from app.models import const  # noqa: E402
 from app.models.schema import ManyLingoItem, VideoAspect, VideoConcatMode, VideoParams  # noqa: E402
 from app.services import manylingo_distribution as distribution  # noqa: E402
 from app.services import manylingo_queue as ml_queue  # noqa: E402
-from app.services import state as sm, upload_post, webui_task  # noqa: E402
+from app.services import state as sm, upload_post, voice as voice_service, webui_task  # noqa: E402
 from app.services.manylingo import build_narration, generate_manylingo_items, items_to_editor_text  # noqa: E402
 
 DEFAULT_WORDS = "house\nliving room\nbedroom"
@@ -58,6 +58,23 @@ def _voice():
     if configured.lower().startswith("en-"):
         return configured
     return "en-US-GuyNeural"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _elevenlabs_voices():
+    api_key = voice_service.get_elevenlabs_api_key()
+    if not api_key:
+        return []
+    return voice_service.get_elevenlabs_voices(api_key)
+
+
+def _elevenlabs_voice_label(value: str) -> str:
+    parts = str(value or "").split(":", 2)
+    if len(parts) >= 3 and parts[2].strip():
+        return parts[2].strip()
+    if len(parts) >= 2:
+        return parts[1].strip()
+    return str(value or "")
 
 
 def _font():
@@ -372,7 +389,40 @@ with st.container(border=True):
     watermark = st.text_input("Marca d'água", value="manylingo.com")
     cta = st.text_area("CTA", value=DEFAULT_CTA, height=70)
     cta_duration = st.slider("Duração CTA", 0.0, 6.0, 2.5, 0.5)
-    voice_name = st.text_input("Voz TTS", value=_voice())
+
+    has_elevenlabs = bool(voice_service.get_elevenlabs_api_key())
+    provider_options = ["Edge TTS", "ElevenLabs"] if has_elevenlabs else ["Edge TTS"]
+    provider_default = 1 if has_elevenlabs else 0
+    voice_provider = st.selectbox(
+        "Provedor de voz",
+        provider_options,
+        index=provider_default,
+    )
+    if voice_provider == "ElevenLabs":
+        elevenlabs_voices = _elevenlabs_voices()
+        if elevenlabs_voices:
+            voice_name = st.selectbox(
+                "Voz ElevenLabs",
+                elevenlabs_voices,
+                format_func=_elevenlabs_voice_label,
+            )
+            st.caption(
+                "Sincronização exata ativada: o ManyLingo usa o alinhamento temporal "
+                "fornecido pelo ElevenLabs para trocar as cenas."
+            )
+        else:
+            voice_name = ""
+            st.warning(
+                "A chave ElevenLabs foi encontrada, mas nenhuma voz favorita ficou disponível. "
+                "Marque pelo menos uma voz como favorita no ElevenLabs e atualize esta página."
+            )
+            if st.button("Atualizar vozes ElevenLabs"):
+                _elevenlabs_voices.clear()
+                st.rerun()
+    else:
+        voice_name = st.text_input("Voz Edge TTS", value=_voice())
+        st.caption("O Edge TTS continua usando WordBoundary para sincronização exata.")
+
     video_source = st.selectbox(
         "Fonte",
         ["pexels", "pixabay"],
