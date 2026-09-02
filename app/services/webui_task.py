@@ -7,6 +7,7 @@ from app.config import config
 from app.controllers.manager.memory_manager import InMemoryTaskManager
 from app.models import const
 from app.models.schema import VideoParams
+from app.services import manylingo_queue as ml_queue
 from app.services import state as sm
 from app.services import task as tm
 from app.services.loomloom import LoomLoomConfirmedVideoRequest
@@ -48,6 +49,56 @@ def get_task_logs(task_id: str) -> list[str]:
     """返回日志快照，避免页面渲染期间持有后台线程使用的锁。"""
     with _task_logs_lock:
         return list(_task_logs.get(task_id, ()))
+
+
+def _ensure_manylingo_job(task_id: str, params: VideoParams) -> None:
+    """Persist ManyLingo jobs even when they were started from manual/test mode.
+
+    Batch and horizontal ManyLingo flows already create their queue record before
+    submitting generation. Manual generation historically did not, so a browser
+    refresh lost the only reference to the finished MP4. This helper fills that gap
+    without creating duplicates for flows that already persisted the task.
+    """
+    if str(getattr(params, "content_mode", "") or "") != "manylingo":
+        return
+
+    if any(job.get("task_id") == task_id for job in ml_queue.list_jobs(limit=500)):
+        return
+
+    raw_items = list(getattr(params, "manylingo_items", None) or [])
+    items = []
+    words = []
+    for item in raw_items:
+        if hasattr(item, "model_dump"):
+            payload = item.model_dump()
+        elif isinstance(item, dict):
+            payload = dict(item)
+        else:
+            payload = {
+                "word": str(getattr(item, "word", "") or ""),
+                "sentence": str(getattr(item, "sentence", "") or ""),
+                "translation": str(getattr(item, "translation", "") or ""),
+                "search_term": str(getattr(item, "search_term", "") or ""),
+            }
+        items.append(payload)
+        word = str(payload.get("word") or "").strip()
+        if word:
+            words.append(word)
+
+    subject = str(getattr(params, "video_subject", "") or "ManyLingo manual test")
+    ml_queue.create_job(
+        task_id=task_id,
+        group={
+            "group_id": None,
+            "level": "A1",
+            "topic": subject,
+            "words": words,
+            "vocabulary_ids": [],
+        },
+        items=items,
+        subject=subject,
+        narration=str(getattr(params, "video_script", "") or ""),
+    )
 
 
 def _run_generation(
@@ -133,6 +184,7 @@ def submit_generation(
     浏览器刷新或 WebSocket 重连也不依赖旧页面内存中的占位符。
     """
     task_params = params.model_copy(deep=True)
+    _ensure_manylingo_job(task_id, task_params)
     # 预览载荷只包含不可变音频路径、参数快照和只读字幕时间轴。复制外层字典，
     # 避免页面后续 rerun 替换缓存字段时影响已经提交到后台队列的任务。
     voice_preview_snapshot = dict(voice_preview) if voice_preview else None

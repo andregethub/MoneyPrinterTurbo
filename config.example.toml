@@ -478,9 +478,9 @@ hide_log = false
 # 视频生成完成后是否自动打开任务目录；关闭后仍可在任务管理中手动打开。
 open_task_folder_on_completion = true
 
-# The WebUI writes the remaining preferences automatically. Uncomment values
-# below only when you want to define initial defaults manually.
-# language = "zh"
+# The WebUI writes the remaining preferences automatically. Values below define
+# initial defaults for a fresh install; the user can still change them in WebUI.
+language = "pt"
 # video_language = ""
 # paragraph_number = 1
 # video_script_prompt = ""
