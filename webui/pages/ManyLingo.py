@@ -213,15 +213,7 @@ def _task_status(task_id):
     if state != const.TASK_STATE_COMPLETE:
         st.progress(progress, text=f"Gerando vídeo: {progress}%")
         return
-    videos = [path for path in task.get("videos") or [] if os.path.exists(path)]
-    if videos:
-        with st.container(border=True):
-            left, right = st.columns([1.7, 1], vertical_alignment="center")
-            with left:
-                st.success("Vídeo concluído e pronto para revisão.")
-                st.caption("O arquivo também aparece na fila abaixo.")
-            with right:
-                st.video(videos[0])
+    st.success("Vídeo concluído. Veja e revise na galeria abaixo.")
 
 
 st.set_page_config(page_title="ManyLingo", page_icon="🌎", layout="wide")
@@ -239,9 +231,6 @@ upload_auto = bool(upload_post.upload_post_service.auto_upload)
 st.title("ManyLingo")
 st.caption("Criação automática de vídeos educativos · conteúdo → voz → cenas → revisão → publicação")
 
-# ---------------------------------------------------------------------------
-# MoneyPrinterTurbo-inspired control deck: four compact configuration cards.
-# ---------------------------------------------------------------------------
 content_col, video_col, audio_col, automation_col = st.columns(4, gap="small")
 
 with content_col:
@@ -308,7 +297,6 @@ with automation_col:
 
 st.space("small")
 
-# Editor is central to the workflow, but no longer consumes a whole page section.
 with st.container(border=True):
     editor_left, editor_right = st.columns([2.2, 1], gap="medium", vertical_alignment="top")
     with editor_left:
@@ -375,7 +363,6 @@ with st.container(border=True):
         else:
             st.info("Importe um currículo em Avançado para liberar lotes.")
 
-# Less-frequent controls stay out of the main composition, like advanced settings in MPT.
 with st.expander("⚙️ Avançado · currículo, distribuição e YouTube 16:9"):
     adv1, adv2 = st.columns(2, gap="large")
     with adv1:
@@ -442,8 +429,6 @@ with st.expander("⚙️ Avançado · currículo, distribuição e YouTube 16:9"
 
 current = str(st.session_state.get("manylingo_task_id", "") or "")
 if current:
-    st.markdown("### Última geração")
-
     @st.fragment(run_every="2s")
     def render_current():
         _task_status(current)
@@ -451,7 +436,107 @@ if current:
     render_current()
 
 st.markdown("### Fila e revisão")
-st.caption("Resultados compactos. Aprove, refaça ou exclua sem ocupar a tela inteira.")
+st.caption("Galeria compacta: até 4 vídeos por linha. Aprove, refaça ou exclua direto no card.")
+
+
+def _render_job_card(job: dict) -> None:
+    status = str(job.get("status") or "queued")
+    is_landscape = job.get("content_format") == "landscape"
+    format_label = "YouTube 16:9" if is_landscape else "Vertical 9:16"
+    words = ", ".join(job.get("words") or [])
+    paths = [path for path in job.get("video_paths") or [] if os.path.exists(path)]
+
+    with st.container(border=True):
+        if paths:
+            st.video(paths[0])
+        else:
+            st.caption("Prévia disponível quando concluir.")
+
+        st.markdown(f"**{job.get('topic') or 'ManyLingo'}**")
+        st.caption(f"{format_label} · {job.get('level') or '—'} · {status}")
+        if words:
+            short_words = words if len(words) <= 72 else words[:69] + "..."
+            st.caption(short_words)
+
+        try:
+            task = sm.state.get_task(str(job.get("task_id") or ""))
+        except Exception:
+            task = None
+        if task and status in {"queued", "generating"}:
+            value = max(0, min(100, int(task.get("progress", 0) or 0)))
+            st.progress(value, text=f"{value}%")
+
+        if job.get("error"):
+            with st.expander("Ver erro"):
+                st.error(str(job["error"]))
+
+        if status == "review":
+            if st.button("✓ Aprovar", key=f"pub-{job['id']}", use_container_width=True):
+                try:
+                    distribution.publish_job_async(job["id"])
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+            if st.button("↻ Refazer", key=f"redo-{job['id']}", use_container_width=True):
+                try:
+                    models = [ManyLingoItem(**item) for item in job.get("items") or []]
+                    narration = build_narration(models)
+                    terms = [item.search_term or item.word for item in models]
+                    params = build_params(
+                        subject=str(job.get("subject") or "ManyLingo vocabulary"),
+                        items=models,
+                        narration=narration,
+                        search_terms=terms,
+                        watermark=watermark,
+                        cta=cta,
+                        cta_duration=cta_duration,
+                        voice_name=voice_name.strip(),
+                        video_source=video_source,
+                        aspect=VideoAspect.landscape.value if is_landscape else VideoAspect.portrait.value,
+                    )
+                    new_id = str(uuid4())
+                    new_job = ml_queue.create_job(
+                        task_id=new_id,
+                        group={"group_id": None, "level": job.get("level"), "topic": job.get("topic"), "words": job.get("words") or [], "vocabulary_ids": []},
+                        items=[model.model_dump() for model in models],
+                        subject=str(job.get("subject") or "ManyLingo vocabulary"),
+                        narration=narration,
+                    )
+                    webui_task.submit_generation(task_id=new_id, params=params, capture_logs=True)
+                    if is_landscape:
+                        distribution.mark_horizontal_job(new_job["id"], {"source_group_ids": job.get("source_group_ids") or []})
+                    ml_queue.set_job_status(job["id"], "failed", error="Substituído por nova geração.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+            if st.button("🗑 Excluir", key=f"delete-{job['id']}", use_container_width=True):
+                ok, error = _delete_job_and_files(job)
+                if ok:
+                    st.rerun()
+                else:
+                    st.error(error)
+        elif status == "failed":
+            if st.button("Remover", key=f"remove-{job['id']}", use_container_width=True):
+                ml_queue.remove_job(job["id"])
+                st.rerun()
+            if st.button("Excluir arquivos", key=f"delete-failed-{job['id']}", use_container_width=True):
+                ok, error = _delete_job_and_files(job)
+                if ok:
+                    st.rerun()
+                else:
+                    st.error(error)
+        elif status == "published":
+            st.success("Publicado")
+            if st.button("Excluir cópia local", key=f"delete-published-{job['id']}", use_container_width=True):
+                ok, error = _delete_job_and_files(job)
+                if ok:
+                    st.rerun()
+                else:
+                    st.error(error)
+        elif status == "publishing":
+            st.info("Publicando...")
+        else:
+            st.caption("Aguardando conclusão")
 
 
 @st.fragment(run_every="3s")
@@ -461,104 +546,12 @@ def render_queue():
         st.info("Nenhum vídeo na fila.")
         return
 
-    for job in jobs:
-        status = str(job.get("status") or "queued")
-        is_landscape = job.get("content_format") == "landscape"
-        format_label = "YouTube 16:9" if is_landscape else "Vertical 9:16"
-        words = ", ".join(job.get("words") or [])
-
-        with st.container(border=True):
-            info_col, action_col, preview_col = st.columns([1.55, 1, 1], gap="medium", vertical_alignment="center")
-            with info_col:
-                st.markdown(f"**{format_label} · {job.get('topic') or 'ManyLingo'}**")
-                if words:
-                    st.caption(words)
-                st.caption(f"{job.get('level') or ''} · status: {status}")
-                try:
-                    task = sm.state.get_task(str(job.get("task_id") or ""))
-                except Exception:
-                    task = None
-                if task and status in {"queued", "generating"}:
-                    value = max(0, min(100, int(task.get("progress", 0) or 0)))
-                    st.progress(value, text=f"{value}%")
-                if job.get("error"):
-                    st.error(str(job["error"]))
-
-            with action_col:
-                if status == "review":
-                    if st.button("✓ Aprovar e publicar", key=f"pub-{job['id']}", use_container_width=True):
-                        try:
-                            distribution.publish_job_async(job["id"])
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(str(exc))
-                    if st.button("↻ Refazer", key=f"redo-{job['id']}", use_container_width=True):
-                        try:
-                            models = [ManyLingoItem(**item) for item in job.get("items") or []]
-                            narration = build_narration(models)
-                            terms = [item.search_term or item.word for item in models]
-                            params = build_params(
-                                subject=str(job.get("subject") or "ManyLingo vocabulary"),
-                                items=models,
-                                narration=narration,
-                                search_terms=terms,
-                                watermark=watermark,
-                                cta=cta,
-                                cta_duration=cta_duration,
-                                voice_name=voice_name.strip(),
-                                video_source=video_source,
-                                aspect=VideoAspect.landscape.value if is_landscape else VideoAspect.portrait.value,
-                            )
-                            new_id = str(uuid4())
-                            new_job = ml_queue.create_job(
-                                task_id=new_id,
-                                group={"group_id": None, "level": job.get("level"), "topic": job.get("topic"), "words": job.get("words") or [], "vocabulary_ids": []},
-                                items=[model.model_dump() for model in models],
-                                subject=str(job.get("subject") or "ManyLingo vocabulary"),
-                                narration=narration,
-                            )
-                            webui_task.submit_generation(task_id=new_id, params=params, capture_logs=True)
-                            if is_landscape:
-                                distribution.mark_horizontal_job(new_job["id"], {"source_group_ids": job.get("source_group_ids") or []})
-                            ml_queue.set_job_status(job["id"], "failed", error="Substituído por nova geração.")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(str(exc))
-                    if st.button("🗑 Excluir", key=f"delete-{job['id']}", use_container_width=True):
-                        ok, error = _delete_job_and_files(job)
-                        if ok:
-                            st.rerun()
-                        else:
-                            st.error(error)
-                elif status == "failed":
-                    if st.button("Remover", key=f"remove-{job['id']}", use_container_width=True):
-                        ml_queue.remove_job(job["id"])
-                        st.rerun()
-                    if st.button("Excluir arquivos", key=f"delete-failed-{job['id']}", use_container_width=True):
-                        ok, error = _delete_job_and_files(job)
-                        if ok:
-                            st.rerun()
-                        else:
-                            st.error(error)
-                elif status == "published":
-                    st.success("Publicado")
-                    if st.button("Excluir cópia local", key=f"delete-published-{job['id']}", use_container_width=True):
-                        ok, error = _delete_job_and_files(job)
-                        if ok:
-                            st.rerun()
-                        else:
-                            st.error(error)
-                elif status == "publishing":
-                    st.info("Publicando...")
-                else:
-                    st.caption("Aguardando conclusão")
-
-            with preview_col:
-                paths = [path for path in job.get("video_paths") or [] if os.path.exists(path)]
-                if paths:
-                    st.video(paths[0])
-                else:
-                    st.caption("Prévia disponível quando concluir.")
+    for start in range(0, len(jobs), 4):
+        row_jobs = jobs[start : start + 4]
+        columns = st.columns(4, gap="small", vertical_alignment="top")
+        for column, job in zip(columns, row_jobs):
+            with column:
+                _render_job_card(job)
 
 
 render_queue()
