@@ -1,8 +1,8 @@
 """ElevenLabs TTS integration for ManyLingo with exact timing metadata.
 
-The regular MoneyPrinterTurbo ElevenLabs path only returns audio.  ManyLingo needs exact
+The regular MoneyPrinterTurbo ElevenLabs path only returns audio. ManyLingo needs exact
 scene boundaries, so this module swaps that implementation for ElevenLabs' official
-``/with-timestamps`` endpoint.  The returned character alignment is collapsed into word
+``/with-timestamps`` endpoint. The returned character alignment is collapsed into word
 boundaries and stored in the same SubMaker-compatible structure used by the rest of the
 pipeline.
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import math
-import os
 import re
 from typing import Union
 
@@ -23,6 +22,7 @@ from moviepy.audio.io.AudioFileClip import AudioFileClip
 from app.config import config
 
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’\-][A-Za-z0-9]+)*")
+_MANYLINGO_ELEVENLABS_SPEED = 0.90
 
 
 def _alignment_to_legacy_submaker(alignment: dict | None) -> SubMaker | None:
@@ -121,6 +121,9 @@ def install_elevenlabs_timing_patch() -> None:
                 "similarity_boost": 0.75,
                 "style": 0.0,
                 "use_speaker_boost": True,
+                # ManyLingo is educational content. A slightly slower pace improves
+                # intelligibility while the returned alignment remains exact for that audio.
+                "speed": _MANYLINGO_ELEVENLABS_SPEED,
             },
         }
 
@@ -128,7 +131,8 @@ def install_elevenlabs_timing_patch() -> None:
             try:
                 logger.info(
                     "start ElevenLabs timestamped TTS, "
-                    f"voice_id: {voice_id}, try: {attempt + 1}"
+                    f"voice_id: {voice_id}, speed: {_MANYLINGO_ELEVENLABS_SPEED:.2f}, "
+                    f"try: {attempt + 1}"
                 )
                 voice_service.ensure_file_path_exists(voice_file)
                 response = requests.post(
@@ -142,7 +146,7 @@ def install_elevenlabs_timing_patch() -> None:
                         "ElevenLabs timestamped TTS failed with status "
                         f"{response.status_code}: {response.text[:200]}"
                     )
-                    if response.status_code in {401, 403, 422}:
+                    if response.status_code in {401, 402, 403, 422}:
                         break
                     continue
 
@@ -176,7 +180,7 @@ def install_elevenlabs_timing_patch() -> None:
 
                 duration = _audio_duration(voice_file)
                 if duration > 0 and sub_maker.offset:
-                    last_start, last_end = sub_maker.offset[-1]
+                    _, last_end = sub_maker.offset[-1]
                     if last_end > int(duration * 10_000_000) + 1_000_000:
                         logger.warning(
                             "ElevenLabs alignment exceeds decoded audio duration; "
@@ -185,7 +189,8 @@ def install_elevenlabs_timing_patch() -> None:
 
                 logger.success(
                     "ElevenLabs timestamped TTS succeeded: "
-                    f"words={len(sub_maker.subs)}, file={voice_file}"
+                    f"words={len(sub_maker.subs)}, speed={_MANYLINGO_ELEVENLABS_SPEED:.2f}, "
+                    f"file={voice_file}"
                 )
                 return sub_maker
             except Exception as exc:
