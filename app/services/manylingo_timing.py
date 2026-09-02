@@ -1,13 +1,9 @@
-"""Exact ManyLingo scene timing from Edge TTS word-boundary events.
+"""Exact ManyLingo scene timing from TTS boundary events.
 
-MoneyPrinterTurbo already receives WordBoundary events from edge-tts while producing the
-narration.  The normal pipeline only keeps them in memory for subtitle generation, so this
-module persists a tiny task-local sidecar and applies those real timings to ManyLingo items
-immediately before the existing ManyLingo renderer runs.
-
-The implementation is intentionally opt-in: standard videos are unchanged, non-Edge TTS
-providers keep the existing estimated ManyLingo timing, and a malformed/mismatched sidecar
-is ignored rather than breaking video generation.
+Edge TTS exposes word-boundary cues and ElevenLabs exposes character-level alignment.
+Both are normalized into the same small task-local sidecar, then applied to ManyLingo
+items immediately before rendering. Providers without exact boundaries keep the existing
+estimated timing so video generation remains backwards-compatible.
 """
 
 from __future__ import annotations
@@ -45,7 +41,7 @@ def _cue_seconds(value) -> float:
 
 
 def extract_word_boundaries(sub_maker) -> list[dict]:
-    """Extract serializable word boundaries from edge-tts 7.x SubMaker cues."""
+    """Extract serializable word boundaries from modern or legacy SubMaker data."""
     cues = list(getattr(sub_maker, "cues", []) or [])
     boundaries: list[dict] = []
     for cue in cues:
@@ -55,18 +51,37 @@ def extract_word_boundaries(sub_maker) -> list[dict]:
         if not text or end <= start:
             continue
         boundaries.append({"text": text, "start": start, "end": end})
+    if boundaries:
+        return boundaries
+
+    # ElevenLabs timestamped TTS is normalized by manylingo_elevenlabs into the project's
+    # historical ``subs`` + ``offset`` structure. Offsets use Edge's 100 ns units.
+    subs = list(getattr(sub_maker, "subs", []) or [])
+    offsets = list(getattr(sub_maker, "offset", []) or [])
+    for text, offset in zip(subs, offsets):
+        if not isinstance(offset, (list, tuple)) or len(offset) < 2:
+            continue
+        try:
+            start = float(offset[0]) / 10_000_000
+            end = float(offset[1]) / 10_000_000
+        except (TypeError, ValueError):
+            continue
+        text = str(text or "").strip()
+        if not text or end <= start:
+            continue
+        boundaries.append({"text": text, "start": start, "end": end})
     return boundaries
 
 
 def save_word_boundaries(voice_file: str, text: str, sub_maker) -> str:
-    """Persist Edge TTS boundaries beside the generated narration audio."""
+    """Persist exact TTS boundaries beside the generated narration audio."""
     boundaries = extract_word_boundaries(sub_maker)
     if not boundaries:
         return ""
 
     sidecar = f"{voice_file}{_TIMING_SUFFIX}"
     payload = {
-        "version": 1,
+        "version": 2,
         "script": str(text or "").strip(),
         "boundaries": boundaries,
     }
@@ -78,7 +93,7 @@ def save_word_boundaries(voice_file: str, text: str, sub_maker) -> str:
         return ""
 
     logger.info(
-        "ManyLingo Edge TTS word boundaries saved: "
+        "ManyLingo exact TTS boundaries saved: "
         f"count={len(boundaries)}, file={sidecar}"
     )
     return sidecar
@@ -90,12 +105,12 @@ def apply_word_boundaries_to_items(
     *,
     audio_duration: float | None = None,
 ) -> bool:
-    """Assign exact item start/end times by matching narration tokens to TTS cues.
+    """Assign exact item start/end times by matching narration tokens to TTS boundaries.
 
     The narration is deterministic: for each item it speaks ``word`` and then ``sentence``.
-    We therefore flatten the expected tokens and the Edge WordBoundary tokens, require an
-    exact ordered match, and use the first cue of the next item as the scene cut.  This keeps
-    the current visual on screen during natural punctuation pauses instead of cutting early.
+    We flatten the expected tokens and observed timing tokens, require an exact ordered
+    match, and use the first timestamp of the next item as the scene cut. This leaves the
+    current visual on screen during natural punctuation pauses instead of cutting early.
     """
     items = list(items)
     boundaries = [dict(value) for value in boundaries or []]
@@ -130,7 +145,7 @@ def apply_word_boundaries_to_items(
 
     if len(observed_flat) < len(expected_flat):
         logger.warning(
-            "ManyLingo exact timing skipped: Edge TTS returned fewer tokens than expected "
+            "ManyLingo exact timing skipped: TTS returned fewer tokens than expected "
             f"({len(observed_flat)} < {len(expected_flat)})"
         )
         return False
@@ -148,7 +163,7 @@ def apply_word_boundaries_to_items(
             0,
         )
         logger.warning(
-            "ManyLingo exact timing skipped: narration and WordBoundary tokens differ at "
+            "ManyLingo exact timing skipped: narration and TTS timing tokens differ at "
             f"token {mismatch_at + 1}: expected={expected_flat[mismatch_at]!r}, "
             f"observed={observed_prefix[mismatch_at]!r}"
         )
@@ -169,9 +184,6 @@ def apply_word_boundaries_to_items(
         resolved_duration = spoken_ends[-1]
     resolved_duration = max(resolved_duration, spoken_ends[-1])
 
-    # The first visual should already be present before the first phoneme.  Subsequent cuts
-    # happen precisely when Edge says the next vocabulary block begins.  The previous scene
-    # naturally stays visible through the pause between blocks.
     starts[0] = 0.0
     for index, item in enumerate(items):
         start = max(0.0, starts[index])
@@ -183,7 +195,7 @@ def apply_word_boundaries_to_items(
         item.end = end
 
     logger.success(
-        "ManyLingo scenes mapped to real Edge TTS timestamps: "
+        "ManyLingo scenes mapped to real TTS timestamps: "
         + ", ".join(
             f"{item.word}={item.start:.3f}-{item.end:.3f}s" for item in items
         )
@@ -223,7 +235,7 @@ def _find_timing_sidecar(output_file: str, script: str) -> dict | None:
 
 
 def prepare_params_with_exact_timing(output_file: str, params: VideoParams) -> bool:
-    """Load the task-local sidecar and mutate ManyLingo items with exact timings."""
+    """Load the task-local timing sidecar and mutate ManyLingo items in-place."""
     if getattr(params, "content_mode", "standard") != "manylingo":
         return False
     items = list(getattr(params, "manylingo_items", []) or [])
@@ -233,13 +245,10 @@ def prepare_params_with_exact_timing(output_file: str, params: VideoParams) -> b
     payload = _find_timing_sidecar(output_file, getattr(params, "video_script", ""))
     if not payload:
         logger.info(
-            "ManyLingo exact Edge timing unavailable; keeping estimated scene timing"
+            "ManyLingo exact TTS timing unavailable; keeping estimated scene timing"
         )
         return False
 
-    # The final rendered clip duration is not known yet, but the last Edge boundary is a
-    # better endpoint than text-length estimation. The existing renderer clamps to the real
-    # final duration afterwards.
     boundaries = payload.get("boundaries") or []
     last_end = max(float(item.get("end", 0.0) or 0.0) for item in boundaries)
     return apply_word_boundaries_to_items(
@@ -275,8 +284,6 @@ def install_timing_patch() -> None:
     if getattr(video_service, "_manylingo_timing_patch_installed", False):
         return
 
-    # install_video_patch() runs first. Wrapping that function here lets us populate exact
-    # item timings BEFORE its post-render ManyLingo overlay/synchronization step executes.
     original_generate_video = video_service.generate_video
 
     def generate_video_with_exact_manylingo_timing(*args, **kwargs):
